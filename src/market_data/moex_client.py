@@ -217,6 +217,47 @@ def normalize_spot_quotes(
     return quotes
 
 
+def load_price_history(
+    security: str,
+    date_from: str,
+    date_to: str,
+    *,
+    currency: str = "RUB",
+    board: str = "TQBR",
+    engine: str = "stock",
+    market: str = "shares",
+    source: str = "moex",
+    client: MoexClient | None = None,
+) -> list[NormalizedQuote]:
+    """Загружает и сразу нормализует историю котировок за диапазон дат."""
+    payload = fetch_price_history(
+        security=security,
+        date_from=date_from,
+        date_to=date_to,
+        board=board,
+        engine=engine,
+        market=market,
+        client=client,
+    )
+    return normalize_spot_quotes(
+        payload,
+        currency=currency,
+        board=board,
+        source=source,
+    )
+
+
+def get_quote_for_date(
+    quotes: list[NormalizedQuote],
+    snapshot_date: str,
+) -> NormalizedQuote | None:
+    """Возвращает котировку на конкретную дату из нормализованной истории."""
+    for quote in quotes:
+        if quote.snapshot_date == snapshot_date:
+            return quote
+    return None
+
+
 def normalize_yield_curve(
     payload: dict[str, Any],
     *,
