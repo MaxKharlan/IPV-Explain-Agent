@@ -17,17 +17,28 @@ POSITION_INPUT_EXAMPLE = {
 }
 
 MARKET_SNAPSHOT_EXAMPLE = {
-    "snapshot_id": "SNAP-2026-05-01",
-    "snapshot_date": "2026-05-01",
+    "snapshot_id": "SNAP-2025-05-05",
+    "snapshot_date": "2025-05-05",
     "source": "moex",
-    "spot_prices": {"SBER": 301.55},
+    "spot_prices": {"SBER": 307.10},
     "yield_curve": {
+        "snapshot_date": "2025-05-05",
         "currency": "RUB",
-        "points": [{"tenor": "1M", "rate": 0.165}],
+        "points": [
+            {"tenor": "1Y", "rate": 16.5},
+            {"tenor": "2Y", "rate": 16.8},
+            {"tenor": "5Y", "rate": 17.1},
+        ],
+        "source": "moex",
     },
     "vol_surface": {
+        "snapshot_date": "2025-05-05",
         "underlier": "SBER",
-        "points": [{"tenor": "1M", "strike": 280.0, "implied_vol": 0.24}],
+        "points": [
+            {"tenor": "1M", "strike": 280.0, "implied_vol": 0.24},
+            {"tenor": "3M", "strike": 290.0, "implied_vol": 0.26},
+        ],
+        "source": "moex",
     },
     "quality_flags": {
         "used_mock_data": False,
