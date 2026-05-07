@@ -91,3 +91,22 @@ def vol_surface_to_dict(snapshot: VolSurfaceSnapshot) -> dict[str, Any]:
         ],
         "source": snapshot.source,
     }
+
+
+def build_mock_vol_surface(
+    snapshot_date: str,
+    *,
+    underlier: str = "SBER",
+    source: str = "mock",
+) -> dict[str, Any]:
+    """Возвращает mock-поверхность волатильности для демо и fallback."""
+    snapshot = VolSurfaceSnapshot(
+        snapshot_date=snapshot_date,
+        underlier=underlier,
+        points=[
+            VolSurfacePoint(tenor="1M", strike=280.0, implied_vol=0.24),
+            VolSurfacePoint(tenor="3M", strike=290.0, implied_vol=0.26),
+        ],
+        source=source,
+    )
+    return vol_surface_to_dict(snapshot)

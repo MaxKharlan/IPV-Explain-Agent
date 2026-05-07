@@ -8,6 +8,8 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+from src.market_data.vol_surface import build_mock_vol_surface
+
 
 MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 
@@ -62,6 +64,23 @@ class MarketSnapshot:
     yield_curve: YieldCurveSnapshot
     vol_surface: dict[str, Any] | None = None
     quality_flags: dict[str, bool] = field(default_factory=dict)
+
+
+MOCK_PRICE_HISTORY: dict[str, list[tuple[str, float]]] = {
+    "SBER": [
+        ("2025-04-28", 314.23),
+        ("2025-04-29", 311.45),
+        ("2025-04-30", 308.90),
+        ("2025-05-02", 299.80),
+        ("2025-05-05", 294.64),
+    ],
+}
+
+MOCK_YIELD_CURVE_POINTS: list[tuple[str, float]] = [
+    ("1Y", 16.5),
+    ("2Y", 16.8),
+    ("5Y", 17.1),
+]
 
 
 @dataclass(slots=True)
@@ -258,6 +277,57 @@ def get_quote_for_date(
     return None
 
 
+def load_mock_price_history(
+    security: str,
+    *,
+    currency: str = "RUB",
+    board: str = "TQBR",
+    source: str = "mock",
+) -> list[NormalizedQuote]:
+    """Возвращает mock-историю котировок для локальной разработки и демо."""
+    rows = MOCK_PRICE_HISTORY.get(security, [])
+    return [
+        NormalizedQuote(
+            symbol=security,
+            snapshot_date=snapshot_date,
+            price=price,
+            currency=currency,
+            board=board,
+            source=source,
+        )
+        for snapshot_date, price in rows
+    ]
+
+
+def safe_load_price_history(
+    security: str,
+    date_from: str,
+    date_to: str,
+    *,
+    currency: str = "RUB",
+    board: str = "TQBR",
+    engine: str = "stock",
+    market: str = "shares",
+    client: MoexClient | None = None,
+) -> tuple[list[NormalizedQuote], bool]:
+    """Пытается загрузить историю из MOEX, а при ошибке возвращает mock-данные."""
+    try:
+        quotes = load_price_history(
+            security=security,
+            date_from=date_from,
+            date_to=date_to,
+            currency=currency,
+            board=board,
+            engine=engine,
+            market=market,
+            source="moex",
+            client=client,
+        )
+        return quotes, False
+    except Exception:
+        return load_mock_price_history(security, currency=currency, board=board), True
+
+
 def normalize_yield_curve(
     payload: dict[str, Any],
     *,
@@ -286,6 +356,41 @@ def normalize_yield_curve(
     )
 
 
+def load_mock_yield_curve(
+    snapshot_date: str,
+    *,
+    currency: str = "RUB",
+    source: str = "mock",
+) -> YieldCurveSnapshot:
+    """Возвращает mock-кривую ставок для локальной разработки и демо."""
+    return YieldCurveSnapshot(
+        snapshot_date=snapshot_date,
+        currency=currency,
+        points=[CurvePoint(tenor=tenor, rate=rate) for tenor, rate in MOCK_YIELD_CURVE_POINTS],
+        source=source,
+    )
+
+
+def safe_load_yield_curve(
+    snapshot_date: str,
+    *,
+    currency: str = "RUB",
+    client: MoexClient | None = None,
+) -> tuple[YieldCurveSnapshot, bool]:
+    """Пытается загрузить кривую из MOEX, а при ошибке возвращает mock-данные."""
+    try:
+        payload = fetch_yield_curve(snapshot_date, currency=currency, client=client)
+        curve = normalize_yield_curve(
+            payload,
+            snapshot_date=snapshot_date,
+            currency=currency,
+            source="moex",
+        )
+        return curve, False
+    except Exception:
+        return load_mock_yield_curve(snapshot_date, currency=currency), True
+
+
 def build_market_snapshot(
     *,
     snapshot_date: str,
@@ -309,4 +414,26 @@ def build_market_snapshot(
             "missing_curve_points": len(yield_curve.points) == 0,
             "surface_interpolated": surface_has_points,
         },
+    )
+
+
+def load_mock_market_snapshot(
+    snapshot_date: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+) -> MarketSnapshot:
+    """Собирает полностью mock MarketSnapshot."""
+    spot_quotes = load_mock_price_history(security, currency=currency)
+    quote = get_quote_for_date(spot_quotes, snapshot_date)
+    selected_quotes = [quote] if quote is not None else []
+    yield_curve = load_mock_yield_curve(snapshot_date, currency=currency)
+    vol_surface = build_mock_vol_surface(snapshot_date, underlier=security)
+    return build_market_snapshot(
+        snapshot_date=snapshot_date,
+        spot_quotes=selected_quotes,
+        yield_curve=yield_curve,
+        vol_surface=vol_surface,
+        source="mock",
+        used_mock_data=True,
     )
