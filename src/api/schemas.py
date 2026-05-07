@@ -31,19 +31,31 @@ MARKET_SNAPSHOT_EXAMPLE = {
         ],
         "source": "moex",
     },
-    "vol_surface": {
+    "option_quotes": {
         "snapshot_date": "2025-05-05",
         "underlier": "SBER",
         "points": [
-            {"tenor": "1M", "strike": 280.0, "implied_vol": 0.24},
-            {"tenor": "3M", "strike": 290.0, "implied_vol": 0.26},
+            {
+                "option_type": "call",
+                "strike": 280.0,
+                "expiry": "2026-09-20",
+                "settlement_price": 12.4,
+                "instrument_id": "SBERC280",
+            },
+            {
+                "option_type": "put",
+                "strike": 290.0,
+                "expiry": "2026-09-20",
+                "settlement_price": 8.1,
+                "instrument_id": "SBERP290",
+            },
         ],
         "source": "moex",
     },
     "quality_flags": {
         "used_mock_data": False,
         "missing_curve_points": False,
-        "surface_interpolated": True,
+        "used_mock_option_quotes": False,
     },
 }
 
