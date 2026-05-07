@@ -14,6 +14,8 @@ from datetime import date
 
 import pytest
 
+from src.agents.pricing_agent import price_bond, price_option, price_swap
+
 from src.attribution import (
     BacktestCase,
     CurveSensitivities,
@@ -267,3 +269,92 @@ def test_e2e_full_pipeline_smoke() -> None:
     _ = attribution.model_dump_json()
     _ = stress.model_dump_json()
     _ = backtest_report.model_dump_json()
+
+
+def test_e2e_real_pricing_agent_option_attribution() -> None:
+    """End-to-end: Pricing Agent (price_option) → Attribution Engine.
+
+    Проверяем, что после рефакторинга Pricing Agent отдаёт PricingResultMin
+    в формате, который Attribution Engine понимает напрямую — без adapter'а.
+    """
+    # SBER call: S=100, K=100, r=0.16, σ=0.24, T=0.5
+    # На t1 спот вырос до 105, vol до 0.27
+    pricing = price_option(
+        position_id="POS-OPT-001",
+        S0=100.0, K=100.0, r0=0.16, sigma0=0.24, T0=0.5,
+        S1=105.0,           r1=0.16, sigma1=0.27, T1=0.5 - 1/365,
+        option_type="call",
+    )
+
+    # Базовая проверка контракта
+    assert pricing.position_id == "POS-OPT-001"
+    assert pricing.greeks_t0.rho is not None  # BS даёт rho
+    assert pricing.greeks_t0.delta > 0  # ATM call: delta около 0.5+
+
+    # Запускаем attribution
+    position = Position(
+        position_id="POS-OPT-001", instrument_type="option",
+        quantity=100.0, currency="RUB",
+    )
+    rf_t0 = RiskFactorSnapshot(
+        snapshot_date=date(2026, 5, 1), spot=100.0, vol=0.24, rate=0.16,
+    )
+    rf_t1 = RiskFactorSnapshot(
+        snapshot_date=date(2026, 5, 2), spot=105.0, vol=0.27, rate=0.16,
+    )
+
+    result = run_attribution(position, pricing, rf_t0, rf_t1)
+
+    # Sanity: residual должен быть мал — BS-цены и BS-греки внутренне согласованы
+    assert result.residual_threshold_passed is True
+    assert abs(result.components.residual) < abs(result.total_pnl) * 0.05
+
+
+def test_e2e_real_pricing_agent_bond_dv01_correctly_converted() -> None:
+    """E2E: bond через Pricing Agent → правильный rho в Attribution.
+
+    Критично: проверяем, что dv01→rho конверсия работает корректно
+    end-to-end. Если кто-то сломает конверсию в pricing_agent.py — этот
+    тест упадёт.
+    """
+    # Простая 2-летняя облигация: купон 16%, номинал 100
+    cashflows = [16.0, 16.0, 116.0]  # годовой купон + погашение
+    times_t0 = [1.0, 2.0, 3.0]
+    rates_t0 = [0.16, 0.16, 0.16]
+    # На t1 — кривая параллельно сдвинулась +10bp
+    times_t1 = times_t0
+    rates_t1 = [0.161, 0.161, 0.161]
+
+    pricing = price_bond(
+        position_id="POS-BND-001",
+        cashflows=cashflows,
+        times_t0=times_t0, rates_t0=rates_t0,
+        times_t1=times_t1, rates_t1=rates_t1,
+    )
+
+    # rho должен быть отрицательным (длинная позиция в bond)
+    # и в порядке -200..-300 для такой облигации (raw, per 1.0 rate unit)
+    assert pricing.greeks_t0.rho is not None
+    assert pricing.greeks_t0.rho < 0
+    # Грубая sanity: для 2Y bond duration ~ 1.7-1.8, price ~ 100,
+    # значит ∂P/∂r ≈ -duration*P ≈ -180
+    assert -300.0 < pricing.greeks_t0.rho < -100.0
+
+    # Запускаем attribution
+    position = Position(
+        position_id="POS-BND-001", instrument_type="bond",
+        quantity=1_000_000.0, currency="RUB",
+    )
+    rf_t0 = RiskFactorSnapshot(
+        snapshot_date=date(2026, 5, 1), spot=100.0, vol=0.0, rate=0.16,
+    )
+    rf_t1 = RiskFactorSnapshot(
+        snapshot_date=date(2026, 5, 1), spot=100.0, vol=0.0, rate=0.161,
+    )
+
+    result = run_attribution(position, pricing, rf_t0, rf_t1)
+
+    # Главная проверка: rho_effect объясняет (почти) весь PnL
+    # Если бы rho был в неправильных единицах — residual был бы 10000× больше
+    assert result.residual_threshold_passed is True
+    assert result.components.rho_effect == pytest.approx(result.total_pnl, rel=0.05)
