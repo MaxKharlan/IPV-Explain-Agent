@@ -8,7 +8,11 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
-from src.market_data.vol_surface import build_mock_vol_surface
+from src.market_data.vol_surface import (
+    build_mock_vol_surface,
+    normalize_option_quotes_to_surface,
+    vol_surface_to_dict,
+)
 
 
 MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
@@ -285,10 +289,11 @@ def load_mock_price_history(
     source: str = "mock",
 ) -> list[NormalizedQuote]:
     """Возвращает mock-историю котировок для локальной разработки и демо."""
-    rows = MOCK_PRICE_HISTORY.get(security, [])
+    fallback_security = security if security in MOCK_PRICE_HISTORY else "SBER"
+    rows = MOCK_PRICE_HISTORY.get(fallback_security, [])
     return [
         NormalizedQuote(
-            symbol=security,
+            symbol=fallback_security,
             snapshot_date=snapshot_date,
             price=price,
             currency=currency,
@@ -323,6 +328,8 @@ def safe_load_price_history(
             source="moex",
             client=client,
         )
+        if not quotes:
+            raise ValueError("MOEX returned empty price history")
         return quotes, False
     except Exception:
         return load_mock_price_history(security, currency=currency, board=board), True
@@ -340,8 +347,8 @@ def normalize_yield_curve(
     points: list[CurvePoint] = []
 
     for row in rows:
-        years = row.get("YEAR") or row.get("years")
-        rate = row.get("YIELD") or row.get("yield")
+        years = row.get("period") or row.get("YEAR") or row.get("years")
+        rate = row.get("value") or row.get("YIELD") or row.get("yield")
 
         if years in (None, "") or rate in (None, ""):
             continue
@@ -386,9 +393,33 @@ def safe_load_yield_curve(
             currency=currency,
             source="moex",
         )
+        if not curve.points:
+            raise ValueError("MOEX returned empty yield curve")
         return curve, False
     except Exception:
         return load_mock_yield_curve(snapshot_date, currency=currency), True
+
+
+def safe_load_vol_surface(
+    snapshot_date: str,
+    *,
+    underlier: str = "SBER",
+    client: MoexClient | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Пытается загрузить vol surface, а при ошибке возвращает mock-данные."""
+    try:
+        payload = fetch_option_quotes(snapshot_date, underlier=underlier, client=client)
+        surface = normalize_option_quotes_to_surface(
+            payload,
+            snapshot_date=snapshot_date,
+            underlier=underlier,
+            source="moex",
+        )
+        if not surface.points:
+            raise ValueError("MOEX returned no vol surface points")
+        return vol_surface_to_dict(surface), False
+    except Exception:
+        return build_mock_vol_surface(snapshot_date, underlier=underlier), True
 
 
 def build_market_snapshot(
@@ -437,3 +468,83 @@ def load_mock_market_snapshot(
         source="mock",
         used_mock_data=True,
     )
+
+
+def load_market_snapshot(
+    snapshot_date: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_vol_surface: bool = True,
+    client: MoexClient | None = None,
+) -> MarketSnapshot:
+    """Возвращает готовый MarketSnapshot на одну дату с live/mock fallback."""
+    spot_history, used_mock_prices = safe_load_price_history(
+        security=security,
+        date_from=snapshot_date,
+        date_to=snapshot_date,
+        currency=currency,
+        board=board,
+        client=client,
+    )
+    selected_quote = get_quote_for_date(spot_history, snapshot_date)
+    selected_quotes = [selected_quote] if selected_quote is not None else []
+
+    if not selected_quotes and used_mock_prices:
+        selected_quote = get_quote_for_date(load_mock_price_history(security, currency=currency, board=board), snapshot_date)
+        selected_quotes = [selected_quote] if selected_quote is not None else []
+
+    yield_curve, used_mock_curve = safe_load_yield_curve(
+        snapshot_date,
+        currency=currency,
+        client=client,
+    )
+
+    vol_surface: dict[str, Any] | None = None
+    used_mock_surface = False
+    if include_vol_surface:
+        vol_surface, used_mock_surface = safe_load_vol_surface(
+            snapshot_date,
+            underlier=security,
+            client=client,
+        )
+
+    return build_market_snapshot(
+        snapshot_date=snapshot_date,
+        spot_quotes=selected_quotes,
+        yield_curve=yield_curve,
+        vol_surface=vol_surface,
+        source="mock" if (used_mock_prices or used_mock_curve or used_mock_surface) else "moex",
+        used_mock_data=(used_mock_prices or used_mock_curve or used_mock_surface),
+    )
+
+
+def load_market_snapshots_for_period(
+    t0: str,
+    t1: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_vol_surface: bool = True,
+    client: MoexClient | None = None,
+) -> tuple[MarketSnapshot, MarketSnapshot]:
+    """Возвращает два снапшота рынка для сравнения дат t0 и t1."""
+    snapshot_t0 = load_market_snapshot(
+        t0,
+        security=security,
+        currency=currency,
+        board=board,
+        include_vol_surface=include_vol_surface,
+        client=client,
+    )
+    snapshot_t1 = load_market_snapshot(
+        t1,
+        security=security,
+        currency=currency,
+        board=board,
+        include_vol_surface=include_vol_surface,
+        client=client,
+    )
+    return snapshot_t0, snapshot_t1
