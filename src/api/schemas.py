@@ -25,14 +25,21 @@ MARKET_SNAPSHOT_EXAMPLE = {
         "currency": "RUB",
         "points": [{"tenor": "1M", "rate": 0.165}],
     },
-    "vol_surface": {
+    "option_quotes": {
         "underlier": "SBER",
-        "points": [{"tenor": "1M", "strike": 280.0, "implied_vol": 0.24}],
+        "points": [
+            {
+                "option_type": "call",
+                "strike": 280.0,
+                "expiry": "2026-09-20",
+                "settlement_price": 12.4,
+            }
+        ],
     },
     "quality_flags": {
         "used_mock_data": False,
         "missing_curve_points": False,
-        "surface_interpolated": True,
+        "used_mock_option_quotes": False,
     },
 }
 

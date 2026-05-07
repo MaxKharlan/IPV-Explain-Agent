@@ -60,7 +60,7 @@
 - `source` — источник данных
 - `spot_prices` — спотовые цены
 - `yield_curve` — кривая ставок
-- `vol_surface` — поверхность волатильности
+- `option_quotes` — нормализованные опционные котировки
 - `quality_flags` — флаги качества данных
 
 ### Пример
@@ -80,19 +80,33 @@
       {"tenor": "3M", "rate": 0.168}
     ]
   },
-  "vol_surface": {
+  "option_quotes": {
     "underlier": "SBER",
     "points": [
-      {"tenor": "1M", "strike": 280.0, "implied_vol": 0.24}
+      {
+        "option_type": "call",
+        "strike": 280.0,
+        "expiry": "2026-09-20",
+        "settlement_price": 12.4
+      }
     ]
   },
   "quality_flags": {
     "used_mock_data": false,
     "missing_curve_points": false,
-    "surface_interpolated": true
+    "used_mock_option_quotes": false
   }
 }
 ```
+
+Важно:
+
+- `MarketSnapshot` должен содержать только рыночные данные и результаты их
+  нормализации.
+- `implied vol` и `vol_surface` логичнее считать частью следующего
+  quant-слоя.
+- То есть `Market Data Layer` отдаёт `spot_prices`, `yield_curve`,
+  `option_quotes`, а `Quant Core` уже строит из этого `vol_surface`.
 
 ---
 
