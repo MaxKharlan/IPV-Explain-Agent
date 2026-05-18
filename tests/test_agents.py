@@ -2,7 +2,11 @@
 
 import pytest
 
-from src.agents.narrative_agent import generate_template_narrative
+from src.agents.narrative_agent import (
+    GigaChatClient,
+    generate_gigachat_narrative,
+    generate_template_narrative,
+)
 from src.agents.orchestrator import run_pipeline, run_pipeline_until_attribution
 
 
@@ -244,3 +248,62 @@ def test_template_narrative_rejects_inconsistent_position_id() -> None:
 
     with pytest.raises(ValueError, match="position_id mismatch"):
         generate_template_narrative(state)
+
+
+def test_gigachat_narrative_uses_structured_output(monkeypatch) -> None:
+    """GigaChat path должен принимать валидный structured JSON."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-001",
+            "currency": "RUB",
+            "total_pnl": 1.61,
+            "components": {
+                "delta_effect": 0.92,
+                "gamma_effect": 0.13,
+                "vega_effect": 0.71,
+                "theta_effect": -0.09,
+                "residual": -0.06,
+            },
+            "residual_threshold_passed": True,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    class FakeGigaChatClient(GigaChatClient):
+        def is_configured(self) -> bool:
+            return True
+
+        def generate_narrative(self, prompt: str) -> dict[str, object]:
+            assert "components=" in prompt
+            return {
+                "position_id": "POS-001",
+                "summary": "Позиция изменилась в основном за счёт delta и vega.",
+                "detailed_explanation": "Наибольший вклад дали delta и vega компоненты.",
+                "top_drivers": [
+                    {"name": "delta_effect", "value": 0.92},
+                    {"name": "vega_effect", "value": 0.71},
+                ],
+                "residual_comment": "Residual находится в допустимом диапазоне.",
+                "validation_status": "passed",
+                "fallback_used": False,
+            }
+
+    narrative = generate_gigachat_narrative(state, client=FakeGigaChatClient())
+
+    assert narrative["position_id"] == "POS-001"
+    assert narrative["fallback_used"] is False
+    assert narrative["validation_status"] == "passed"
