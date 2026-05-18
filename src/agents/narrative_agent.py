@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import ssl
 from typing import Any
 from uuid import uuid4
@@ -13,6 +14,7 @@ from urllib.request import Request, urlopen
 import certifi
 
 from src.agents.state import IPVState
+from src.rag.retriever import InMemoryVectorRetriever, RetrievalResult, build_semantic_retriever
 
 
 REQUIRED_COMPONENT_KEYS = (
@@ -32,6 +34,8 @@ REQUIRED_NARRATIVE_KEYS = (
     "validation_status",
     "fallback_used",
 )
+
+DEFAULT_RAG_TOP_K = 3
 
 
 class GigaChatClient:
@@ -266,11 +270,80 @@ def _pick_top_drivers(
 
 def build_gigachat_prompt(payload: dict[str, object]) -> str:
     """Строит structured prompt для GigaChat на основе attribution payload."""
+    return build_gigachat_prompt_with_context(payload, rag_context=None)
+
+
+def get_default_rag_corpus_root() -> Path:
+    """Возвращает путь до локального RAG-корпуса."""
+    env_root = os.getenv("IPV_RAG_CORPUS_ROOT")
+    if env_root:
+        return Path(env_root).expanduser()
+    return Path(__file__).resolve().parents[2] / "docs" / "mock_ipv_documents"
+
+
+def build_rag_query(payload: dict[str, object]) -> str:
+    """Строит retrieval query из позиции и attribution-сигналов."""
+    components = payload["components"]
+    assert isinstance(components, dict)
+
+    top_drivers = _pick_top_drivers(components)
+    driver_terms = ", ".join(_format_driver(str(item["name"])) for item in top_drivers)
+    residual_state = (
+        "остаток в допустимом диапазоне"
+        if payload["residual_threshold_passed"]
+        else "остаток превышает порог и требует проверки"
+    )
+    return (
+        f"{payload['instrument_type']} позиция; "
+        f"основные факторы: {driver_terms}; "
+        f"{residual_state}; "
+        "интерпретация атрибуции, греков и Taylor decomposition"
+    )
+
+
+def retrieve_methodology_context(
+    payload: dict[str, object],
+    *,
+    retriever: InMemoryVectorRetriever | None = None,
+    top_k: int = DEFAULT_RAG_TOP_K,
+) -> list[RetrievalResult]:
+    """Возвращает релевантные фрагменты методологии для narrative generation."""
+    semantic_retriever = retriever
+    if semantic_retriever is None:
+        corpus_root = get_default_rag_corpus_root()
+        if not corpus_root.exists():
+            return []
+        semantic_retriever = build_semantic_retriever(corpus_root)
+
+    query = build_rag_query(payload)
+    return semantic_retriever.retrieve(query, top_k=top_k, min_score=0.05)
+
+
+def format_retrieved_context(results: list[RetrievalResult]) -> str:
+    """Форматирует retrieved chunks в prompt-friendly methodology context."""
+    if not results:
+        return ""
+
+    sections = []
+    for index, result in enumerate(results, start=1):
+        sections.append(
+            f"[Контекст {index}] Источник: {result.chunk.title} "
+            f"(score={result.score:.3f})\n{result.chunk.text}"
+        )
+    return "\n\n".join(sections)
+
+
+def build_gigachat_prompt_with_context(
+    payload: dict[str, object],
+    *,
+    rag_context: str | None,
+) -> str:
+    """Строит structured prompt для GigaChat с опциональным RAG-контекстом."""
     components = payload["components"]
     assert isinstance(components, dict)
     top_drivers = _pick_top_drivers(components)
     expected_status = "passed" if payload["residual_threshold_passed"] else "warning"
-    return (
+    prompt = (
         "Сформируй JSON по правилам ниже.\n"
         "Правила:\n"
         "1. Используй только входные данные.\n"
@@ -296,11 +369,22 @@ def build_gigachat_prompt(payload: dict[str, object]) -> str:
         "   - предложение 3: второй по значимости фактор с его числом\n"
         "14. detailed_explanation — ровно 5 полных предложений:\n"
         "   - предложение 1: общее изменение стоимости с числом total_pnl\n"
-        "   - предложение 2: вклад самого сильного фактора с числом\n"
-        "   - предложение 3: вклад второго фактора с числом\n"
-        "   - предложение 4: вклад остальных заметных факторов с числами\n"
-        "   - предложение 5: отдельный вывод про остаток с числом\n"
+        "   - предложение 2: вклад самого сильного фактора с числом и его экономический смысл\n"
+        "   - предложение 3: вклад второго фактора с числом и его экономический смысл\n"
+        "   - предложение 4: вклад остальных заметных факторов с числами и краткой интерпретацией\n"
+        "   - предложение 5: отдельный вывод про остаток с числом и методологической трактовкой\n"
         "15. residual_comment — ровно 1 полное предложение про остаток с числом.\n"
+        "16. Если ниже дан методологический контекст, обязательно используй его в detailed_explanation "
+        "и residual_comment для интерпретации факторов и остатка.\n"
+        "17. Если дан методологический контекст, в detailed_explanation должны появиться хотя бы два "
+        "содержательных интерпретационных оборота из этого контекста, например: "
+        "«чувствительность стоимости к движению базового актива», "
+        "«чувствительность к изменению волатильности», "
+        "«необъяснённая часть изменения стоимости», "
+        "«в рамках разложения Taylor decomposition».\n"
+        "18. Не цитируй контекст дословно длинными кусками, а используй его для осмысленного объяснения.\n"
+        "19. Если в контексте есть трактовка остатка, используй её в последнем предложении detailed_explanation "
+        "и в residual_comment.\n"
         "Формат ответа:\n"
         "{\n"
         '  "position_id": "string",\n'
@@ -320,6 +404,15 @@ def build_gigachat_prompt(payload: dict[str, object]) -> str:
         f"top_drivers={json.dumps(top_drivers, ensure_ascii=False)}\n"
         f"residual_threshold_passed={payload['residual_threshold_passed']}\n"
     )
+    if rag_context:
+        prompt += (
+            "Методологический контекст для интерпретации:\n"
+            f"{rag_context}\n"
+            "Используй этот контекст как основную базу для смысловой интерпретации факторов и остатка. "
+            "Не добавляй из него новые числа и не подменяй им входные значения. "
+            "В detailed_explanation явно свяжи числовые эффекты с методологическими трактовками из контекста.\n"
+        )
+    return prompt
 
 
 def _build_summary(payload: dict[str, object], top_drivers: list[dict[str, float | str]]) -> str:
@@ -419,10 +512,18 @@ def generate_gigachat_narrative(
     state: IPVState,
     *,
     client: GigaChatClient | None = None,
+    retriever: InMemoryVectorRetriever | None = None,
 ) -> dict[str, Any]:
     """Строит narrative через GigaChat и валидирует ответ."""
     payload = build_template_narrative_payload(state)
-    prompt = build_gigachat_prompt(payload)
+    retrieved_context = ""
+    try:
+        retrieval_results = retrieve_methodology_context(payload, retriever=retriever)
+        retrieved_context = format_retrieved_context(retrieval_results)
+    except Exception:
+        retrieved_context = ""
+
+    prompt = build_gigachat_prompt_with_context(payload, rag_context=retrieved_context or None)
     gigachat_client = client or GigaChatClient()
     if not gigachat_client.is_configured():
         raise RuntimeError("GigaChat client is not configured.")

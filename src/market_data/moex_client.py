@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 import json
 from typing import Any
 from urllib.parse import urlencode
@@ -392,6 +393,21 @@ def get_quote_for_date(quotes: list[NormalizedQuote], snapshot_date: str) -> Nor
     return None
 
 
+def get_nearest_quote_for_date(
+    quotes: list[NormalizedQuote],
+    snapshot_date: str,
+) -> NormalizedQuote | None:
+    """Возвращает ближайшую по дате котировку, если точной даты нет."""
+    if not quotes:
+        return None
+
+    target_date = date.fromisoformat(snapshot_date)
+    return min(
+        quotes,
+        key=lambda quote: abs((date.fromisoformat(quote.snapshot_date) - target_date).days),
+    )
+
+
 def load_mock_price_history(
     security: str,
     *,
@@ -580,6 +596,14 @@ def market_snapshot_to_dict(snapshot: MarketSnapshot) -> dict[str, Any]:
     }
 
 
+def is_snapshot_usable(snapshot: dict[str, Any], *, security: str) -> bool:
+    """Проверяет, содержит ли snapshot минимально пригодные данные для pricing."""
+    spot_prices = snapshot.get("spot_prices", {})
+    yield_curve = snapshot.get("yield_curve", {})
+    curve_points = yield_curve.get("points", []) if isinstance(yield_curve, dict) else []
+    return bool(spot_prices.get(security)) and bool(curve_points)
+
+
 def load_mock_market_snapshot(
     snapshot_date: str,
     *,
@@ -589,6 +613,8 @@ def load_mock_market_snapshot(
     """Собирает полностью mock MarketSnapshot."""
     spot_quotes = load_mock_price_history(security, currency=currency)
     quote = get_quote_for_date(spot_quotes, snapshot_date)
+    if quote is None:
+        quote = get_nearest_quote_for_date(spot_quotes, snapshot_date)
     selected_quotes = [quote] if quote is not None else []
     yield_curve = load_mock_yield_curve(snapshot_date, currency=currency)
     option_quotes = load_mock_option_quotes(snapshot_date, underlier=security)
@@ -622,12 +648,14 @@ def load_market_snapshot(
         client=client,
     )
     selected_quote = get_quote_for_date(spot_history, snapshot_date)
+    if selected_quote is None and used_mock_prices:
+        selected_quote = get_nearest_quote_for_date(spot_history, snapshot_date)
     selected_quotes = [selected_quote] if selected_quote is not None else []
     if not selected_quotes and used_mock_prices:
-        selected_quote = get_quote_for_date(
-            load_mock_price_history(security, currency=currency, board=board),
-            snapshot_date,
-        )
+        mock_history = load_mock_price_history(security, currency=currency, board=board)
+        selected_quote = get_quote_for_date(mock_history, snapshot_date)
+        if selected_quote is None:
+            selected_quote = get_nearest_quote_for_date(mock_history, snapshot_date)
         selected_quotes = [selected_quote] if selected_quote is not None else []
 
     yield_curve, used_mock_curve = safe_load_yield_curve(
@@ -722,11 +750,13 @@ def load_or_fetch_market_snapshot(
 ) -> dict[str, Any]:
     """Загружает snapshot из PostgreSQL или собирает его заново."""
     if snapshot_exists(snapshot_date, security=security, database_url=database_url):
-        return load_market_snapshot_by_date(
+        stored_snapshot = load_market_snapshot_by_date(
             snapshot_date,
             security=security,
             database_url=database_url,
         )
+        if is_snapshot_usable(stored_snapshot, security=security):
+            return stored_snapshot
 
     snapshot = build_and_store_market_snapshot(
         snapshot_date,
@@ -795,12 +825,17 @@ def load_or_fetch_market_snapshots_for_period(
         database_url=database_url,
     )
     if both_exist:
-        return load_market_snapshots_for_period_from_db(
+        snapshot_t0, snapshot_t1 = load_market_snapshots_for_period_from_db(
             t0,
             t1,
             security=security,
             database_url=database_url,
         )
+        if is_snapshot_usable(snapshot_t0, security=security) and is_snapshot_usable(
+            snapshot_t1,
+            security=security,
+        ):
+            return snapshot_t0, snapshot_t1
 
     snapshot_t0, snapshot_t1 = build_and_store_market_snapshots_for_period(
         t0,

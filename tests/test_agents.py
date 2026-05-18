@@ -4,10 +4,16 @@ import pytest
 
 from src.agents.narrative_agent import (
     GigaChatClient,
+    build_rag_query,
+    build_template_narrative_payload,
+    format_retrieved_context,
     generate_gigachat_narrative,
     generate_template_narrative,
+    retrieve_methodology_context,
     run_narrative_agent,
 )
+from src.rag.indexer import RAGChunk
+from src.rag.retriever import RetrievalResult
 from src.agents.orchestrator import run_pipeline, run_pipeline_until_attribution
 
 
@@ -362,3 +368,124 @@ def test_run_narrative_agent_falls_back_when_gigachat_fails(monkeypatch) -> None
     assert result_state["narrative_result"]["fallback_used"] is True
     assert result_state["errors"]
     assert "narrative_fallback" in result_state["errors"][0]
+
+
+def test_gigachat_prompt_can_include_rag_context() -> None:
+    """Narrative layer should pass retrieved methodology context into the prompt."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-001",
+            "currency": "RUB",
+            "total_pnl": 1.61,
+            "components": {
+                "delta_effect": 0.92,
+                "gamma_effect": 0.13,
+                "vega_effect": 0.71,
+                "theta_effect": -0.09,
+                "residual": -0.06,
+            },
+            "residual_threshold_passed": True,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    class FakeRAGRetriever:
+        def retrieve(self, query: str, *, top_k: int = 3, min_score: float = 0.0):
+            assert "delta" in query.lower() or "дельта" in query.lower()
+            _ = top_k, min_score
+            return [
+                RetrievalResult(
+                    chunk=RAGChunk(
+                        chunk_id="doc::chunk-0",
+                        doc_id="doc",
+                        source_path="/tmp/doc.md",
+                        title="Greeks Reference",
+                        text="Дельта отражает влияние движения базового актива на стоимость позиции.",
+                    ),
+                    score=0.91,
+                )
+            ]
+
+    class FakeGigaChatClientWithContext(GigaChatClient):
+        def is_configured(self) -> bool:
+            return True
+
+        def generate_narrative(self, prompt: str) -> dict[str, object]:
+            assert "Методологический контекст" in prompt
+            assert "Дельта отражает влияние движения базового актива" in prompt
+            return {
+                "position_id": "POS-001",
+                "summary": "Изменение стоимости составило 1.61 RUB. Главный фактор — delta effect размером 0.92 RUB. Второй фактор — vega effect размером 0.71 RUB.",
+                "detailed_explanation": "Общее изменение стоимости составило 1.61 RUB. Наибольший вклад внес delta effect размером 0.92 RUB. Второй вклад внес vega effect размером 0.71 RUB. Остальные эффекты были ограниченными по величине. Остаток составил -0.06 RUB и находится в допустимом диапазоне.",
+                "top_drivers": [
+                    {"name": "delta_effect", "value": 0.92},
+                    {"name": "vega_effect", "value": 0.71},
+                ],
+                "residual_comment": "Остаток составил -0.06 RUB и находится в допустимом диапазоне.",
+                "validation_status": "passed",
+                "fallback_used": False,
+            }
+
+    narrative = generate_gigachat_narrative(
+        state,
+        client=FakeGigaChatClientWithContext(),
+        retriever=FakeRAGRetriever(),
+    )
+
+    assert narrative["fallback_used"] is False
+    assert narrative["position_id"] == "POS-001"
+
+
+def test_retrieve_methodology_context_returns_empty_without_corpus(monkeypatch, tmp_path) -> None:
+    """Narrative retrieval should degrade gracefully when no corpus is available."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-001",
+            "currency": "RUB",
+            "total_pnl": 1.61,
+            "components": {
+                "delta_effect": 0.92,
+                "gamma_effect": 0.13,
+                "vega_effect": 0.71,
+                "theta_effect": -0.09,
+                "residual": -0.06,
+            },
+            "residual_threshold_passed": True,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    monkeypatch.setenv("IPV_RAG_CORPUS_ROOT", str(tmp_path / "missing_corpus"))
+    payload = build_template_narrative_payload(state)
+
+    assert retrieve_methodology_context(payload) == []
+    assert "option" in build_rag_query(payload)
+    assert format_retrieved_context([]) == ""
