@@ -6,6 +6,7 @@ from src.agents.narrative_agent import (
     GigaChatClient,
     generate_gigachat_narrative,
     generate_template_narrative,
+    run_narrative_agent,
 )
 from src.agents.orchestrator import run_pipeline, run_pipeline_until_attribution
 
@@ -307,3 +308,57 @@ def test_gigachat_narrative_uses_structured_output(monkeypatch) -> None:
     assert narrative["position_id"] == "POS-001"
     assert narrative["fallback_used"] is False
     assert narrative["validation_status"] == "passed"
+
+
+def test_run_narrative_agent_falls_back_when_gigachat_fails(monkeypatch) -> None:
+    """При ошибке GigaChat агент должен откатываться на template narrative."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-001",
+            "currency": "RUB",
+            "total_pnl": 1.61,
+            "components": {
+                "delta_effect": 0.92,
+                "gamma_effect": 0.13,
+                "vega_effect": 0.71,
+                "theta_effect": -0.09,
+                "residual": -0.06,
+            },
+            "residual_threshold_passed": True,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    class BrokenGigaChatClient(GigaChatClient):
+        def is_configured(self) -> bool:
+            return True
+
+        def generate_narrative(self, prompt: str) -> dict[str, object]:
+            _ = prompt
+            raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr(
+        "src.agents.narrative_agent.GigaChatClient",
+        BrokenGigaChatClient,
+    )
+
+    result_state = run_narrative_agent(state)
+
+    assert result_state["fallback_flags"]["used_template_narrative"] is True
+    assert result_state["narrative_result"]["fallback_used"] is True
+    assert result_state["errors"]
+    assert "narrative_fallback" in result_state["errors"][0]

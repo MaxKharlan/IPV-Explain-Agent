@@ -320,15 +320,25 @@ def generate_gigachat_narrative(
     return validate_narrative_output(narrative, payload)
 
 
+def _fallback_to_template(state: IPVState, error: Exception | None = None) -> IPVState:
+    """Переключает narrative layer на шаблонный fallback."""
+    if error is not None:
+        state["errors"].append(f"narrative_fallback: {error}")
+    narrative_result = generate_template_narrative(state)
+    state["narrative_result"] = narrative_result
+    state["fallback_flags"]["used_template_narrative"] = True
+    return state
+
+
 def run_narrative_agent(state: IPVState) -> IPVState:
     """Заполняет state полем narrative_result."""
     client = GigaChatClient()
     if client.is_configured():
-        narrative_result = generate_gigachat_narrative(state, client=client)
-        state["narrative_result"] = narrative_result
-        state["fallback_flags"]["used_template_narrative"] = False
-    else:
-        narrative_result = generate_template_narrative(state)
-        state["narrative_result"] = narrative_result
-        state["fallback_flags"]["used_template_narrative"] = True
-    return state
+        try:
+            narrative_result = generate_gigachat_narrative(state, client=client)
+            state["narrative_result"] = narrative_result
+            state["fallback_flags"]["used_template_narrative"] = False
+            return state
+        except Exception as exc:
+            return _fallback_to_template(state, error=exc)
+    return _fallback_to_template(state)
