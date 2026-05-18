@@ -1,34 +1,36 @@
-### Всей команде: ориентируйтесь на эти JSON-контракты, когда будете обрабатывать входные и отдавать выходные данные.
+# Актуальные контракты проекта IPV Explain Agent
 
-# JSON-контракты проекта IPV Explain Agent
-
-Ниже список основных JSON-контрактов, которые связывают весь проект.
-Идея простая: каждый модуль получает понятный вход и возвращает понятный
-выход.
+Ниже описаны **текущие рабочие контракты**, которые реально используются в коде проекта.
+Это не целевая архитектура “на будущее”, а именно то, что сейчас проходит через pipeline.
 
 ---
 
 ## 1. `PositionInput`
 
-Это входная позиция, которую система будет оценивать и объяснять.
+Входной payload позиции, который получает orchestration-layer.
 
-### Что хранит
+### Поля
 
-- `position_id` — ID позиции
-- `instrument_type` — тип инструмента (`bond`, `option`, `swap`)
+- `position_id` — идентификатор позиции
+- `instrument_type` — тип инструмента
 - `book` — книга / портфель
-- `currency` — валюта
-- `quantity` — объём
-- `counterparty` — контрагент
-- `as_of_dates.t0` — первая дата
-- `as_of_dates.t1` — вторая дата
+- `currency` — валюта результата
+- `quantity` — размер позиции
+- `counterparty` — контрагент, если передаётся
+- `as_of_dates.t0` — начальная дата
+- `as_of_dates.t1` — конечная дата
 - `instrument` — параметры инструмента
+
+### Важное
+
+Сейчас end-to-end pipeline полноценно поддерживает **option flow**.
+`bond` и `swap` частично поддержаны на уровне quant-функций, но не доведены как полный orchestration path.
 
 ### Пример
 
 ```json
 {
-  "position_id": "POS-001",
+  "position_id": "POS-SBER-CALL-001",
   "instrument_type": "option",
   "book": "EQ_VOL",
   "currency": "RUB",
@@ -42,7 +44,9 @@
     "underlier": "SBER",
     "option_type": "call",
     "strike": 280.0,
-    "maturity_date": "2026-09-20"
+    "maturity_date": "2026-09-20",
+    "vol_t0": 0.24,
+    "vol_t1": 0.27
   }
 }
 ```
@@ -51,36 +55,50 @@
 
 ## 2. `MarketSnapshot`
 
-Это снимок рыночных данных на конкретную дату.
+Нормализованный снимок рынка на одну дату, который отдаёт `Market Data Layer`.
 
-### Что хранит
+### Поля
 
-- `snapshot_id` — ID снапшота
-- `snapshot_date` — дата
-- `source` — источник данных
-- `spot_prices` — спотовые цены
-- `yield_curve` — кривая ставок
-- `option_quotes` — нормализованные опционные котировки
-- `quality_flags` — флаги качества данных
+- `snapshot_id`
+- `snapshot_date`
+- `source`
+- `spot_prices`
+- `yield_curve`
+- `option_quotes`
+- `quality_flags`
+
+### Важное
+
+`MarketSnapshot` сейчас содержит только:
+
+- `spot_prices`
+- `yield_curve`
+- `option_quotes`
+
+`implied vol` и `vol_surface` в этот контракт **не входят**. Они должны строиться выше, в quant-слое.
 
 ### Пример
 
 ```json
 {
-  "snapshot_id": "SNAP-2026-05-01",
-  "snapshot_date": "2026-05-01",
+  "snapshot_id": "SNAP-2025-05-05",
+  "snapshot_date": "2025-05-05",
   "source": "moex",
   "spot_prices": {
-    "SBER": 301.55
+    "SBER": 307.10
   },
   "yield_curve": {
+    "snapshot_date": "2025-05-05",
     "currency": "RUB",
     "points": [
-      {"tenor": "1M", "rate": 0.165},
-      {"tenor": "3M", "rate": 0.168}
-    ]
+      {"tenor": "1Y", "rate": 16.5},
+      {"tenor": "2Y", "rate": 16.8},
+      {"tenor": "5Y", "rate": 17.1}
+    ],
+    "source": "moex"
   },
   "option_quotes": {
+    "snapshot_date": "2025-05-05",
     "underlier": "SBER",
     "points": [
       {
@@ -90,7 +108,8 @@
         "settlement_price": 12.4,
         "instrument_id": "SBERC280"
       }
-    ]
+    ],
+    "source": "moex"
   },
   "quality_flags": {
     "used_mock_data": false,
@@ -100,141 +119,190 @@
 }
 ```
 
-Важно:
-
-- `MarketSnapshot` должен содержать только рыночные данные и результаты их
-  нормализации.
-- `implied vol` и `vol_surface` логичнее считать частью следующего
-  quant-слоя.
-- То есть `Market Data Layer` отдаёт `spot_prices`, `yield_curve`,
-  `option_quotes`, а `Quant Core` уже строит из этого `vol_surface`.
-
 ---
 
-## 3. `PricingResult`
+## 3. `PricingResultMin`
 
-Это результат работы quant-модели.
+Это **реальный контракт между Pricing Agent и Attribution Engine**, который используется в проекте сейчас.
 
-### Что хранит
+### Поля
 
-- `position_id` — ID позиции
-- `instrument_type` — тип инструмента
-- `price_t0` — цена на первой дате
-- `price_t1` — цена на второй дате
-- `currency` — валюта
-- `sensitivities` — чувствительности (`delta`, `gamma`, `vega`, `theta`, `rho`)
-- `model_name` — название модели
-- `model_inputs_summary` — краткая сводка входов модели
+- `position_id`
+- `price_t0`
+- `price_t1`
+- `greeks_t0`
+
+### Структура `greeks_t0`
+
+- `delta`
+- `gamma`
+- `vega`
+- `theta`
+- `rho`
+
+### Важное
+
+Это минимальный quant-контракт для attribution.
+
+Он **не совпадает** с более богатым презентационным `PricingResult`, который мог бы включать:
+
+- `instrument_type`
+- `currency`
+- `model_name`
+- `model_inputs_summary`
+
+Сейчас эти поля не участвуют в реальном orchestration flow между pricing и attribution.
 
 ### Пример
 
 ```json
 {
-  "position_id": "POS-001",
-  "instrument_type": "option",
+  "position_id": "POS-SBER-CALL-001",
   "price_t0": 12.41,
-  "price_t1": 14.02,
-  "currency": "RUB",
-  "sensitivities": {
+  "price_t1": 13.86,
+  "greeks_t0": {
     "delta": 0.53,
     "gamma": 0.012,
-    "vega": 4.8,
+    "vega": 4.80,
     "theta": -0.15,
-    "rho": 0.9
-  },
-  "model_name": "black_scholes",
-  "model_inputs_summary": {
-    "spot_t0": 301.55,
-    "spot_t1": 307.10,
-    "vol_t0": 0.24,
-    "vol_t1": 0.27
+    "rho": 0.90
   }
 }
 ```
 
 ---
 
-## 4. `AttributionOutput`
+## 4. `RiskFactorSnapshot`
 
-Это результат PnL attribution: объяснение, из-за чего изменилась стоимость.
+Это минимальный снапшот риск-факторов, который получает `Attribution Engine`.
 
-### Что хранит
+### Поля
 
-- `position_id` — ID позиции
-- `currency` — валюта
-- `price_t0` — цена на первой дате
-- `price_t1` — цена на второй дате
-- `total_pnl` — общее изменение стоимости
-- `components.delta_effect` — вклад движения базового актива
-- `components.gamma_effect` — нелинейный вклад
-- `components.vega_effect` — вклад волатильности
-- `components.theta_effect` — вклад времени
-- `components.residual` — необъяснённый остаток
-- `stress_results` — стресс-сценарии
-- `waterfall_components` — компоненты для waterfall chart
-- `validation` — проверка качества результата
+- `snapshot_date`
+- `spot`
+- `vol`
+- `rate`
+
+### Важное
+
+Этот контракт не хранится как отдельный API payload, но реально используется внутри `attribution_agent.py`.
+Он строится из:
+
+- `MarketSnapshot`
+- position-level vol inputs (`vol_t0`, `vol_t1`)
 
 ### Пример
 
 ```json
 {
-  "position_id": "POS-001",
+  "snapshot_date": "2026-05-01",
+  "spot": 301.55,
+  "vol": 0.24,
+  "rate": 0.165
+}
+```
+
+---
+
+## 5. `AttributionResult`
+
+Это **реальный контракт**, который сейчас возвращает `Attribution Engine` и получает `Narrative Agent`.
+
+### Поля
+
+- `position_id`
+- `currency`
+- `price_t0`
+- `price_t1`
+- `total_pnl`
+- `components`
+- `explained_pnl`
+- `explained_ratio`
+- `residual_threshold_passed`
+- `residual_threshold`
+- `notes`
+
+### Структура `components`
+
+- `delta_effect`
+- `gamma_effect`
+- `vega_effect`
+- `theta_effect`
+- `rho_effect`
+- `residual`
+
+### Важное
+
+Это **не тот же самый формат**, что старый презентационный `AttributionOutput` с:
+
+- `stress_results`
+- `waterfall_components`
+- `validation`
+
+Сейчас narrative-слой работает именно с `AttributionResult` в этой форме.
+
+### Пример
+
+```json
+{
+  "position_id": "POS-SBER-CALL-001",
   "currency": "RUB",
   "price_t0": 12.41,
-  "price_t1": 14.02,
-  "total_pnl": 1.61,
+  "price_t1": 13.86,
+  "total_pnl": 1.45,
   "components": {
-    "delta_effect": 0.92,
-    "gamma_effect": 0.13,
-    "vega_effect": 0.71,
-    "theta_effect": -0.09,
-    "residual": -0.06
+    "delta_effect": 0.17,
+    "gamma_effect": -0.01,
+    "vega_effect": 1.54,
+    "theta_effect": -0.13,
+    "rho_effect": -0.07,
+    "residual": 0.05
   },
-  "stress_results": [
-    {"scenario_name": "parallel_shift_1bp", "pnl": -0.01}
-  ],
-  "waterfall_components": [
-    {"label": "Delta", "value": 0.92},
-    {"label": "Gamma", "value": 0.13},
-    {"label": "Vega", "value": 0.71},
-    {"label": "Theta", "value": -0.09},
-    {"label": "Residual", "value": -0.06}
-  ],
-  "validation": {
-    "residual_threshold_passed": true,
-    "notes": []
-  }
+  "explained_pnl": 1.40,
+  "explained_ratio": 0.9655,
+  "residual_threshold_passed": true,
+  "residual_threshold": 0.05,
+  "notes": []
 }
 ```
 
 ---
 
-## 5. `NarrativeOutput`
+## 6. `NarrativeOutput`
 
-Это результат LLM-слоя: человеческое текстовое объяснение.
+Это контракт результата narrative-слоя.
 
-### Что хранит
+### Поля
 
-- `position_id` — ID позиции
-- `summary` — краткое объяснение
-- `detailed_explanation` — подробное объяснение
-- `top_drivers` — главные драйверы изменения
-- `residual_comment` — комментарий по residual
-- `validation_status` — статус проверки текста
-- `fallback_used` — использовался ли шаблон вместо LLM
+- `position_id`
+- `summary`
+- `detailed_explanation`
+- `top_drivers`
+- `residual_comment`
+- `validation_status`
+- `fallback_used`
+
+### Важное
+
+Сейчас narrative может идти по двум путям:
+
+- `GigaChat` path
+- template fallback path
+
+Но в обоих случаях наружу возвращается один и тот же `NarrativeOutput`.
 
 ### Пример
 
 ```json
 {
-  "position_id": "POS-001",
-  "summary": "Рост справедливой стоимости в основном связан с движением базового актива и ростом implied volatility.",
-  "detailed_explanation": "Основной вклад в изменение стоимости дали delta и vega компоненты.",
+  "position_id": "POS-SBER-CALL-001",
+  "summary": "Изменение стоимости составило 1.45 RUB. Главный фактор — вега-фактор размером 1.54 RUB. Второй по значимости фактор — тета-фактор размером -0.13 RUB.",
+  "detailed_explanation": "Общее изменение стоимости позиции за период составило 1.45 RUB. Наибольший вклад внес фактор вега, отражающий чувствительность стоимости к изменению волатильности. Следующим по вкладу стал тета-фактор, связанный с временным распадом опциона. Остальные заметные факторы внесли ограниченный вклад. Остаток находится в допустимом диапазоне и подтверждает корректность разложения.",
   "top_drivers": [
-    {"name": "delta_effect", "value": 0.92},
-    {"name": "vega_effect", "value": 0.71}
+    {"name": "vega_effect", "value": 1.54},
+    {"name": "theta_effect", "value": -0.13}
   ],
-  "residual_comment": "Residual находится в допустимом диапазоне.",
+  "residual_comment": "Остаток составляет 0.05 RUB и находится в допустимых пределах.",
   "validation_status": "passed",
   "fallback_used": false
 }
@@ -242,11 +310,11 @@
 
 ---
 
-## 6. `IPVState`
+## 7. `IPVState`
 
-Это общее состояние пайплайна в LangGraph.
+Это текущее состояние pipeline между агентами.
 
-### Что хранит
+### Поля
 
 - `position`
 - `market_snapshot_t0`
@@ -258,15 +326,20 @@
 - `errors`
 - `fallback_flags`
 
+### Структура `fallback_flags`
+
+- `used_mock_market_data`
+- `used_template_narrative`
+
 ### Пример
 
 ```json
 {
-  "position": "PositionInput",
+  "position": "PositionInput | null",
   "market_snapshot_t0": "MarketSnapshot | null",
   "market_snapshot_t1": "MarketSnapshot | null",
-  "pricing_result": "PricingResult | null",
-  "attribution_result": "AttributionOutput | null",
+  "pricing_result": "PricingResultMin | null",
+  "attribution_result": "AttributionResult | null",
   "narrative_result": "NarrativeOutput | null",
   "report_result": "dict | null",
   "errors": [],
@@ -279,24 +352,33 @@
 
 ---
 
-# Коротко весь pipeline
+## 8. Текущий рабочий pipeline
 
 ```text
 PositionInput
--> MarketSnapshot
--> PricingResult
--> AttributionOutput
+-> MarketSnapshot(t0, t1)
+-> PricingResultMin
+-> AttributionResult
 -> NarrativeOutput
--> Report
+-> Report payload
 ```
 
 ---
 
-# Зачем это всё нужно
+## 9. Текущее положение дел
 
-Эти контракты нужны, чтобы:
+Сейчас проект стабильно проходит путь:
 
-- кванты писали математику отдельно
-- market data слой поставлял данные в одном формате
-- LLM не выдумывал числа, а работал по готовому attribution
-- API, UI и отчёты использовали одинаковые структуры
+- `position`
+- `market data`
+- `pricing`
+- `attribution`
+- `narrative`
+
+при следующих условиях:
+
+- используется `option`-позиция
+- доступен PostgreSQL storage или snapshot пересобирается live/mock путём
+- для live narrative настроен `GigaChat`
+
+Если `GigaChat` недоступен, narrative слой уходит в template fallback, но общий pipeline остаётся рабочим.

@@ -12,10 +12,22 @@ def extract_market_request(position: dict[str, Any]) -> dict[str, Any]:
     """Готовит минимальный запрос к Market Data Layer из PositionInput."""
     as_of_dates = position.get("as_of_dates", {})
     instrument = position.get("instrument", {})
+    instrument_type = position.get("instrument_type")
+    underlier = instrument.get("underlier")
+    security = underlier
+    include_option_quotes = instrument_type == "option"
+
+    if security is None:
+        # Rate-driven instruments still need yield-curve snapshots even if they
+        # do not have a natural equity underlier. We keep a stable technical
+        # security key here until a dedicated rates market snapshot contract lands.
+        security = instrument.get("security") or position.get("currency") or "RUB"
+
     return {
         "t0": as_of_dates.get("t0"),
         "t1": as_of_dates.get("t1"),
-        "security": instrument.get("underlier"),
+        "security": security,
+        "include_option_quotes": include_option_quotes,
     }
 
 
@@ -27,12 +39,13 @@ def run_market_data_agent(state: IPVState) -> IPVState:
 
     request = extract_market_request(position)
     if not request["t0"] or not request["t1"] or not request["security"]:
-        raise ValueError("Position must include as_of_dates.t0, as_of_dates.t1 and instrument.underlier.")
+        raise ValueError("Position must include as_of_dates.t0, as_of_dates.t1 and a market identifier.")
 
     snapshot_t0, snapshot_t1 = load_or_fetch_market_snapshots_for_period(
         request["t0"],
         request["t1"],
         security=request["security"],
+        include_option_quotes=bool(request["include_option_quotes"]),
     )
     state["market_snapshot_t0"] = snapshot_t0
     state["market_snapshot_t1"] = snapshot_t1

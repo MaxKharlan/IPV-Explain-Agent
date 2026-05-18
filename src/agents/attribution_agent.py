@@ -65,31 +65,50 @@ def _build_risk_factor_snapshots(
     market_t1: dict[str, object],
 ) -> tuple[RiskFactorSnapshot, RiskFactorSnapshot]:
     """Преобразует market snapshot в risk-factor schemas для attribution."""
+    instrument_type = str(position.get("instrument_type"))
     instrument = position.get("instrument", {})
     if not isinstance(instrument, dict):
         raise ValueError("Position.instrument must be a dictionary.")
 
-    underlier = instrument.get("underlier")
-    if underlier is None:
-        raise ValueError("Position.instrument.underlier is required.")
-
-    sigma0, sigma1 = resolve_option_sigmas(position)
-    spot_t0 = float(market_t0["spot_prices"][underlier])
-    spot_t1 = float(market_t1["spot_prices"][underlier])
     rate_t0 = _extract_reference_rate(market_t0)
     rate_t1 = _extract_reference_rate(market_t1)
 
+    if instrument_type == "option":
+        underlier = instrument.get("underlier")
+        if underlier is None:
+            raise ValueError("Position.instrument.underlier is required.")
+
+        sigma0, sigma1 = resolve_option_sigmas(position)
+        spot_t0 = float(market_t0["spot_prices"][underlier])
+        spot_t1 = float(market_t1["spot_prices"][underlier])
+        return (
+            RiskFactorSnapshot(
+                snapshot_date=_parse_snapshot_date(market_t0),
+                spot=spot_t0,
+                vol=sigma0,
+                rate=rate_t0,
+            ),
+            RiskFactorSnapshot(
+                snapshot_date=_parse_snapshot_date(market_t1),
+                spot=spot_t1,
+                vol=sigma1,
+                rate=rate_t1,
+            ),
+        )
+
+    # Rate-driven instruments currently use placeholder spot/vol while attribution
+    # consumes their rho-based pricing sensitivity and the change in reference rate.
     return (
         RiskFactorSnapshot(
             snapshot_date=_parse_snapshot_date(market_t0),
-            spot=spot_t0,
-            vol=sigma0,
+            spot=1.0,
+            vol=0.0,
             rate=rate_t0,
         ),
         RiskFactorSnapshot(
             snapshot_date=_parse_snapshot_date(market_t1),
-            spot=spot_t1,
-            vol=sigma1,
+            spot=1.0,
+            vol=0.0,
             rate=rate_t1,
         ),
     )

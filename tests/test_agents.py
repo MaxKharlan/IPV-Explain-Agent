@@ -178,6 +178,153 @@ def test_full_pipeline_builds_narrative_and_report(monkeypatch) -> None:
     assert "summary" in state["report_result"]["report_summary"]
 
 
+def test_pipeline_until_attribution_bond_flow(monkeypatch) -> None:
+    """Pipeline должен проходить bond-case через pricing и attribution."""
+    snapshot_t0 = {
+        "snapshot_id": "SNAP-2026-05-01",
+        "snapshot_date": "2026-05-01",
+        "source": "mock",
+        "spot_prices": {},
+        "yield_curve": {
+            "snapshot_date": "2026-05-01",
+            "currency": "RUB",
+            "points": [
+                {"tenor": "1Y", "rate": 16.5},
+                {"tenor": "2Y", "rate": 16.8},
+                {"tenor": "3Y", "rate": 17.0},
+            ],
+            "source": "mock",
+        },
+        "option_quotes": None,
+        "quality_flags": {
+            "used_mock_data": False,
+            "missing_curve_points": False,
+            "used_mock_option_quotes": False,
+        },
+    }
+    snapshot_t1 = {
+        "snapshot_id": "SNAP-2026-05-02",
+        "snapshot_date": "2026-05-02",
+        "source": "mock",
+        "spot_prices": {},
+        "yield_curve": {
+            "snapshot_date": "2026-05-02",
+            "currency": "RUB",
+            "points": [
+                {"tenor": "1Y", "rate": 16.7},
+                {"tenor": "2Y", "rate": 17.0},
+                {"tenor": "3Y", "rate": 17.2},
+            ],
+            "source": "mock",
+        },
+        "option_quotes": None,
+        "quality_flags": {
+            "used_mock_data": False,
+            "missing_curve_points": False,
+            "used_mock_option_quotes": False,
+        },
+    }
+
+    monkeypatch.setattr(
+        "src.agents.market_data_agent.load_or_fetch_market_snapshots_for_period",
+        lambda *args, **kwargs: (snapshot_t0, snapshot_t1),
+    )
+
+    position = {
+        "position_id": "POS-BOND-001",
+        "instrument_type": "bond",
+        "book": "RATES",
+        "currency": "RUB",
+        "quantity": 1000.0,
+        "as_of_dates": {"t0": "2026-05-01", "t1": "2026-05-02"},
+        "instrument": {
+            "cashflows": [8.0, 8.0, 108.0],
+            "times": [1.0, 2.0, 3.0],
+        },
+    }
+
+    state = run_pipeline_until_attribution(position)
+
+    assert state["pricing_result"]["position_id"] == "POS-BOND-001"
+    assert state["pricing_result"]["greeks_t0"]["rho"] != 0.0
+    assert state["attribution_result"]["position_id"] == "POS-BOND-001"
+    assert "rho_effect" in state["attribution_result"]["components"]
+
+
+def test_pipeline_until_attribution_swap_flow(monkeypatch) -> None:
+    """Pipeline должен проходить swap-case через pricing и attribution."""
+    snapshot_t0 = {
+        "snapshot_id": "SNAP-2026-05-01",
+        "snapshot_date": "2026-05-01",
+        "source": "mock",
+        "spot_prices": {},
+        "yield_curve": {
+            "snapshot_date": "2026-05-01",
+            "currency": "RUB",
+            "points": [
+                {"tenor": "1Y", "rate": 16.0},
+                {"tenor": "2Y", "rate": 16.2},
+                {"tenor": "3Y", "rate": 16.4},
+            ],
+            "source": "mock",
+        },
+        "option_quotes": None,
+        "quality_flags": {
+            "used_mock_data": False,
+            "missing_curve_points": False,
+            "used_mock_option_quotes": False,
+        },
+    }
+    snapshot_t1 = {
+        "snapshot_id": "SNAP-2026-05-02",
+        "snapshot_date": "2026-05-02",
+        "source": "mock",
+        "spot_prices": {},
+        "yield_curve": {
+            "snapshot_date": "2026-05-02",
+            "currency": "RUB",
+            "points": [
+                {"tenor": "1Y", "rate": 16.1},
+                {"tenor": "2Y", "rate": 16.3},
+                {"tenor": "3Y", "rate": 16.5},
+            ],
+            "source": "mock",
+        },
+        "option_quotes": None,
+        "quality_flags": {
+            "used_mock_data": False,
+            "missing_curve_points": False,
+            "used_mock_option_quotes": False,
+        },
+    }
+
+    monkeypatch.setattr(
+        "src.agents.market_data_agent.load_or_fetch_market_snapshots_for_period",
+        lambda *args, **kwargs: (snapshot_t0, snapshot_t1),
+    )
+
+    position = {
+        "position_id": "POS-SWAP-001",
+        "instrument_type": "swap",
+        "book": "RATES",
+        "currency": "RUB",
+        "quantity": 1.0,
+        "as_of_dates": {"t0": "2026-05-01", "t1": "2026-05-02"},
+        "instrument": {
+            "notional": 1000000.0,
+            "fixed_rate": 0.16,
+            "times": [1.0, 2.0, 3.0],
+        },
+    }
+
+    state = run_pipeline_until_attribution(position)
+
+    assert state["pricing_result"]["position_id"] == "POS-SWAP-001"
+    assert state["pricing_result"]["greeks_t0"]["rho"] != 0.0
+    assert state["attribution_result"]["position_id"] == "POS-SWAP-001"
+    assert "rho_effect" in state["attribution_result"]["components"]
+
+
 def test_template_narrative_prioritizes_largest_drivers() -> None:
     """Template narrative должен выбирать крупнейшие драйверы по модулю."""
     state = {
