@@ -64,6 +64,83 @@ def _extract_reference_rate(snapshot: dict[str, Any]) -> float:
     return rates[0]
 
 
+def _curve_rate_for_time(
+    snapshot: dict[str, Any],
+    time_to_maturity: float,
+) -> float:
+    """Возвращает ставку кривой для заданного срока по nearest-tenor rule."""
+    times, rates = _extract_curve_inputs(snapshot)
+    nearest_index = min(range(len(times)), key=lambda index: abs(times[index] - time_to_maturity))
+    return rates[nearest_index]
+
+
+def _extract_bond_inputs(
+    position: dict[str, Any],
+    market_t0: dict[str, Any],
+    market_t1: dict[str, Any],
+) -> tuple[list[float], list[float], list[float], list[float]]:
+    """Готовит cashflow-times-rates входы для bond pricing."""
+    instrument = position.get("instrument", {})
+    if not isinstance(instrument, dict):
+        raise ValueError("Position.instrument must be a dictionary.")
+
+    cashflows = instrument.get("cashflows")
+    times = instrument.get("times")
+    if not isinstance(cashflows, list) or not isinstance(times, list):
+        raise ValueError("Bond instrument requires cashflows and times lists.")
+    if len(cashflows) != len(times) or not cashflows:
+        raise ValueError("Bond cashflows and times must be non-empty lists of equal length.")
+
+    cashflows_f = [float(value) for value in cashflows]
+    times_f = [float(value) for value in times]
+    rates_t0 = [_curve_rate_for_time(market_t0, maturity) for maturity in times_f]
+    rates_t1 = [_curve_rate_for_time(market_t1, maturity) for maturity in times_f]
+    return cashflows_f, times_f, rates_t0, rates_t1
+
+
+def _extract_swap_inputs(
+    position: dict[str, Any],
+    market_t0: dict[str, Any],
+    market_t1: dict[str, Any],
+) -> tuple[float, float, list[float], list[float], list[float], list[float], list[float]]:
+    """Готовит входы для swap pricing на базе yield curve snapshots."""
+    instrument = position.get("instrument", {})
+    if not isinstance(instrument, dict):
+        raise ValueError("Position.instrument must be a dictionary.")
+
+    notional = float(instrument["notional"])
+    fixed_rate = float(instrument["fixed_rate"])
+    times = instrument.get("times")
+    if not isinstance(times, list) or not times:
+        raise ValueError("Swap instrument requires a non-empty times list.")
+
+    times_f = [float(value) for value in times]
+    discount_rates_t0 = [_curve_rate_for_time(market_t0, maturity) for maturity in times_f]
+    discount_rates_t1 = [_curve_rate_for_time(market_t1, maturity) for maturity in times_f]
+
+    forward_rates_t0_raw = instrument.get("forward_rates_t0")
+    forward_rates_t1_raw = instrument.get("forward_rates_t1")
+    if isinstance(forward_rates_t0_raw, list) and isinstance(forward_rates_t1_raw, list):
+        if len(forward_rates_t0_raw) != len(times_f) or len(forward_rates_t1_raw) != len(times_f):
+            raise ValueError("Swap forward rates must match times list length.")
+        forward_rates_t0 = [float(value) for value in forward_rates_t0_raw]
+        forward_rates_t1 = [float(value) for value in forward_rates_t1_raw]
+    else:
+        # Integration-friendly fallback: use the same curve as both discount and forward.
+        forward_rates_t0 = discount_rates_t0.copy()
+        forward_rates_t1 = discount_rates_t1.copy()
+
+    return (
+        notional,
+        fixed_rate,
+        times_f,
+        discount_rates_t0,
+        forward_rates_t0,
+        discount_rates_t1,
+        forward_rates_t1,
+    )
+
+
 def resolve_option_sigmas(position: dict[str, Any]) -> tuple[float, float]:
     """Определяет sigma_t0 и sigma_t1 для option pricing.
 
@@ -107,37 +184,67 @@ def build_pricing_result(
     instrument = position.get("instrument", {})
     position_id = position["position_id"]
 
-    if instrument_type != "option":
-        raise NotImplementedError(
-            "Current pipeline wiring supports option positions first. "
-            "Bond and swap agent wiring should be added next."
+    if instrument_type == "option":
+        underlier = instrument.get("underlier")
+        strike = float(instrument["strike"])
+        maturity_date = instrument["maturity_date"]
+        option_type = instrument.get("option_type", "call")
+        sigma0, sigma1 = resolve_option_sigmas(position)
+        spot_t0 = _extract_option_spot(market_t0, underlier)
+        spot_t1 = _extract_option_spot(market_t1, underlier)
+        rate_t0 = _extract_reference_rate(market_t0)
+        rate_t1 = _extract_reference_rate(market_t1)
+        time_t0 = _years_to_maturity(market_t0["snapshot_date"], maturity_date)
+        time_t1 = _years_to_maturity(market_t1["snapshot_date"], maturity_date)
+
+        return price_option(
+            position_id=position_id,
+            S0=spot_t0,
+            K=strike,
+            r0=rate_t0,
+            sigma0=sigma0,
+            T0=time_t0,
+            S1=spot_t1,
+            r1=rate_t1,
+            sigma1=sigma1,
+            T1=time_t1,
+            option_type=option_type,
         )
 
-    underlier = instrument.get("underlier")
-    strike = float(instrument["strike"])
-    maturity_date = instrument["maturity_date"]
-    option_type = instrument.get("option_type", "call")
-    sigma0, sigma1 = resolve_option_sigmas(position)
-    spot_t0 = _extract_option_spot(market_t0, underlier)
-    spot_t1 = _extract_option_spot(market_t1, underlier)
-    rate_t0 = _extract_reference_rate(market_t0)
-    rate_t1 = _extract_reference_rate(market_t1)
-    time_t0 = _years_to_maturity(market_t0["snapshot_date"], maturity_date)
-    time_t1 = _years_to_maturity(market_t1["snapshot_date"], maturity_date)
+    if instrument_type == "bond":
+        cashflows, times_t0, rates_t0, rates_t1 = _extract_bond_inputs(position, market_t0, market_t1)
+        return price_bond(
+            position_id=position_id,
+            cashflows=cashflows,
+            times_t0=times_t0,
+            rates_t0=rates_t0,
+            times_t1=times_t0,
+            rates_t1=rates_t1,
+        )
 
-    return price_option(
-        position_id=position_id,
-        S0=spot_t0,
-        K=strike,
-        r0=rate_t0,
-        sigma0=sigma0,
-        T0=time_t0,
-        S1=spot_t1,
-        r1=rate_t1,
-        sigma1=sigma1,
-        T1=time_t1,
-        option_type=option_type,
-    )
+    if instrument_type == "swap":
+        (
+            notional,
+            fixed_rate,
+            times,
+            discount_rates_t0,
+            forward_rates_t0,
+            discount_rates_t1,
+            forward_rates_t1,
+        ) = _extract_swap_inputs(position, market_t0, market_t1)
+        return price_swap(
+            position_id=position_id,
+            notional=notional,
+            fixed_rate=fixed_rate,
+            times_t0=times,
+            discount_rates_t0=discount_rates_t0,
+            forward_rates_t0=forward_rates_t0,
+            times_t1=times,
+            discount_rates_t1=discount_rates_t1,
+            forward_rates_t1=forward_rates_t1,
+        )
+
+    raise NotImplementedError(f"Unsupported instrument_type={instrument_type}")
 
 
 def run_pricing_agent(state: IPVState) -> IPVState:
