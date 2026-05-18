@@ -8,6 +8,13 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
+from src.market_data.db import (
+    load_market_snapshots_for_period as load_market_snapshots_for_period_from_db,
+    load_market_snapshot_by_date,
+    save_market_snapshot,
+    snapshot_exists,
+)
+
 
 MOEX_ISS_BASE_URL = "https://iss.moex.com/iss"
 
@@ -552,6 +559,27 @@ def build_market_snapshot(
     )
 
 
+def market_snapshot_to_dict(snapshot: MarketSnapshot) -> dict[str, Any]:
+    """Преобразует MarketSnapshot в JSON-friendly словарь."""
+    return {
+        "snapshot_id": snapshot.snapshot_id,
+        "snapshot_date": snapshot.snapshot_date,
+        "source": snapshot.source,
+        "spot_prices": snapshot.spot_prices,
+        "yield_curve": {
+            "snapshot_date": snapshot.yield_curve.snapshot_date,
+            "currency": snapshot.yield_curve.currency,
+            "points": [
+                {"tenor": point.tenor, "rate": point.rate}
+                for point in snapshot.yield_curve.points
+            ],
+            "source": snapshot.yield_curve.source,
+        },
+        "option_quotes": snapshot.option_quotes,
+        "quality_flags": snapshot.quality_flags,
+    }
+
+
 def load_mock_market_snapshot(
     snapshot_date: str,
     *,
@@ -657,3 +685,131 @@ def load_market_snapshots_for_period(
         client=client,
     )
     return snapshot_t0, snapshot_t1
+
+
+def build_and_store_market_snapshot(
+    snapshot_date: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_option_quotes: bool = True,
+    client: MoexClient | None = None,
+    database_url: str | None = None,
+) -> MarketSnapshot:
+    """Собирает MarketSnapshot и сохраняет его в PostgreSQL."""
+    snapshot = load_market_snapshot(
+        snapshot_date,
+        security=security,
+        currency=currency,
+        board=board,
+        include_option_quotes=include_option_quotes,
+        client=client,
+    )
+    save_market_snapshot(snapshot, security=security, database_url=database_url)
+    return snapshot
+
+
+def load_or_fetch_market_snapshot(
+    snapshot_date: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_option_quotes: bool = True,
+    client: MoexClient | None = None,
+    database_url: str | None = None,
+) -> dict[str, Any]:
+    """Загружает snapshot из PostgreSQL или собирает его заново."""
+    if snapshot_exists(snapshot_date, security=security, database_url=database_url):
+        return load_market_snapshot_by_date(
+            snapshot_date,
+            security=security,
+            database_url=database_url,
+        )
+
+    snapshot = build_and_store_market_snapshot(
+        snapshot_date,
+        security=security,
+        currency=currency,
+        board=board,
+        include_option_quotes=include_option_quotes,
+        client=client,
+        database_url=database_url,
+    )
+    return market_snapshot_to_dict(snapshot)
+
+
+def build_and_store_market_snapshots_for_period(
+    t0: str,
+    t1: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_option_quotes: bool = True,
+    client: MoexClient | None = None,
+    database_url: str | None = None,
+) -> tuple[MarketSnapshot, MarketSnapshot]:
+    """Собирает и сохраняет два MarketSnapshot для дат t0 и t1."""
+    snapshot_t0 = build_and_store_market_snapshot(
+        t0,
+        security=security,
+        currency=currency,
+        board=board,
+        include_option_quotes=include_option_quotes,
+        client=client,
+        database_url=database_url,
+    )
+    snapshot_t1 = build_and_store_market_snapshot(
+        t1,
+        security=security,
+        currency=currency,
+        board=board,
+        include_option_quotes=include_option_quotes,
+        client=client,
+        database_url=database_url,
+    )
+    return snapshot_t0, snapshot_t1
+
+
+def load_or_fetch_market_snapshots_for_period(
+    t0: str,
+    t1: str,
+    *,
+    security: str = "SBER",
+    currency: str = "RUB",
+    board: str = "TQBR",
+    include_option_quotes: bool = True,
+    client: MoexClient | None = None,
+    database_url: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Загружает или собирает и сохраняет пару snapshot для t0 и t1."""
+    both_exist = snapshot_exists(
+        t0,
+        security=security,
+        database_url=database_url,
+    ) and snapshot_exists(
+        t1,
+        security=security,
+        database_url=database_url,
+    )
+    if both_exist:
+        return load_market_snapshots_for_period_from_db(
+            t0,
+            t1,
+            security=security,
+            database_url=database_url,
+        )
+
+    snapshot_t0, snapshot_t1 = build_and_store_market_snapshots_for_period(
+        t0,
+        t1,
+        security=security,
+        currency=currency,
+        board=board,
+        include_option_quotes=include_option_quotes,
+        client=client,
+        database_url=database_url,
+    )
+    return market_snapshot_to_dict(snapshot_t0), market_snapshot_to_dict(snapshot_t1)
