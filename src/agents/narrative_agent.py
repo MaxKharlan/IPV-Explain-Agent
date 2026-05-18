@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from typing import Any
+from uuid import uuid4
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import certifi
 
 from src.agents.state import IPVState
 
@@ -38,24 +42,32 @@ class GigaChatClient:
         *,
         api_url: str | None = None,
         api_key: str | None = None,
+        access_token: str | None = None,
+        auth_url: str | None = None,
         model: str | None = None,
+        scope: str | None = None,
         timeout_seconds: int = 30,
     ) -> None:
         self.api_url = api_url or os.getenv("GIGACHAT_API_URL")
-        self.api_key = api_key or os.getenv("GIGACHAT_API_KEY")
+        self.api_key = api_key or os.getenv("GIGACHAT_API_KEY") or os.getenv("GIGACHAT_AUTH_KEY")
+        self.access_token = access_token or os.getenv("GIGACHAT_ACCESS_TOKEN")
+        self.auth_url = auth_url or os.getenv(
+            "GIGACHAT_AUTH_URL",
+            "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+        )
         self.model = model or os.getenv("GIGACHAT_MODEL", "GigaChat")
+        self.scope = scope or os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
         self.timeout_seconds = timeout_seconds
 
     def is_configured(self) -> bool:
         """Проверяет, что для GigaChat заданы обязательные параметры."""
-        return bool(self.api_url and self.api_key)
+        return bool(self.api_url and (self.access_token or self.api_key))
 
     def build_headers(self) -> dict[str, str]:
         """Строит HTTP headers для вызова GigaChat."""
-        if not self.api_key:
-            raise ValueError("GigaChat API key is not configured.")
+        token = self.get_access_token()
         return {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         }
 
@@ -67,8 +79,8 @@ class GigaChatClient:
                 {
                     "role": "system",
                     "content": (
-                        "You are a financial explainability assistant. "
-                        "Return only valid JSON without markdown fences."
+                        "Ты ассистент по финансовой объяснимости. "
+                        "Возвращай только валидный JSON без markdown-блоков."
                     ),
                 },
                 {
@@ -93,6 +105,63 @@ class GigaChatClient:
 
         raise ValueError("Unable to extract narrative JSON from GigaChat response.")
 
+    def build_ssl_context(self) -> ssl.SSLContext:
+        """Строит SSL context для HTTPS-вызова.
+
+        По умолчанию используется certifi bundle.
+        Для локальной отладки можно отключить проверку через
+        `GIGACHAT_VERIFY_SSL=false`.
+        """
+        verify_ssl = os.getenv("GIGACHAT_VERIFY_SSL", "true").lower() != "false"
+        if not verify_ssl:
+            return ssl._create_unverified_context()
+        return ssl.create_default_context(cafile=certifi.where())
+
+    def get_access_token(self) -> str:
+        """Возвращает access token для chat/completions.
+
+        Если он не задан напрямую, получает его через OAuth endpoint.
+        """
+        if self.access_token:
+            return self.access_token
+        return self.request_access_token()
+
+    def request_access_token(self) -> str:
+        """Обменивает authorization key на access token."""
+        if not self.auth_url:
+            raise ValueError("GigaChat auth URL is not configured.")
+        if not self.api_key:
+            raise ValueError("GigaChat authorization key is not configured.")
+
+        request = Request(
+            self.auth_url,
+            data=f"scope={self.scope}".encode("utf-8"),
+            headers={
+                "Authorization": f"Basic {self.api_key}",
+                "RqUID": str(uuid4()),
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                context=self.build_ssl_context(),
+            ) as response:
+                raw_response = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            raise RuntimeError(f"GigaChat auth HTTP error: {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"GigaChat auth connection error: {exc.reason}") from exc
+
+        access_token = raw_response.get("access_token")
+        if not isinstance(access_token, str) or not access_token:
+            raise RuntimeError("GigaChat auth response did not contain access_token.")
+        self.access_token = access_token
+        return access_token
+
     def generate_narrative(self, prompt: str) -> dict[str, Any]:
         """Выполняет HTTP-вызов к GigaChat и возвращает narrative JSON."""
         if not self.api_url:
@@ -105,7 +174,11 @@ class GigaChatClient:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                context=self.build_ssl_context(),
+            ) as response:
                 raw_response = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             raise RuntimeError(f"GigaChat HTTP error: {exc.code}") from exc
@@ -194,11 +267,31 @@ def build_gigachat_prompt(payload: dict[str, object]) -> str:
     components = payload["components"]
     assert isinstance(components, dict)
     top_drivers = _pick_top_drivers(components)
+    expected_status = "passed" if payload["residual_threshold_passed"] else "warning"
     return (
-        "Сформируй JSON-объект с полями "
-        "`position_id`, `summary`, `detailed_explanation`, `top_drivers`, "
-        "`residual_comment`, `validation_status`, `fallback_used`.\n"
+        "Сформируй ТОЛЬКО JSON-объект без markdown.\n"
+        "Все строковые поля должны быть непустыми.\n"
+        "Все текстовые поля верни на русском языке.\n"
         "Не выдумывай новые числа и используй только переданные данные.\n"
+        "Правила:\n"
+        "1. `summary` — 1 короткое предложение о главных драйверах.\n"
+        "2. `detailed_explanation` — 1-2 предложения с упоминанием top drivers и их вкладов.\n"
+        "3. `top_drivers` — верни только те драйверы, которые переданы ниже.\n"
+        "4. `residual_comment` — явно скажи, residual в допустимом диапазоне или нет.\n"
+        f"5. `validation_status` — верни строго значение `{expected_status}`.\n"
+        "6. `fallback_used` — верни строго false.\n"
+        "7. Пустые строки запрещены.\n"
+        "Используй такой шаблон ответа:\n"
+        "{\n"
+        '  "position_id": "string",\n'
+        '  "summary": "non-empty string",\n'
+        '  "detailed_explanation": "non-empty string",\n'
+        '  "top_drivers": [{"name": "delta_effect", "value": 0.0}],\n'
+        '  "residual_comment": "non-empty string",\n'
+        f'  "validation_status": "{expected_status}",\n'
+        '  "fallback_used": false\n'
+        "}\n"
+        "Данные для ответа:\n"
         f"position_id={payload['position_id']}\n"
         f"instrument_type={payload['instrument_type']}\n"
         f"currency={payload['currency']}\n"
@@ -206,7 +299,6 @@ def build_gigachat_prompt(payload: dict[str, object]) -> str:
         f"components={json.dumps(components, ensure_ascii=False)}\n"
         f"top_drivers={json.dumps(top_drivers, ensure_ascii=False)}\n"
         f"residual_threshold_passed={payload['residual_threshold_passed']}\n"
-        "Поле `fallback_used` должно быть false."
     )
 
 
