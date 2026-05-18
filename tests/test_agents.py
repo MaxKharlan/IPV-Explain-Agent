@@ -1,5 +1,8 @@
 """Smoke-tests for agent orchestration pipeline."""
 
+import pytest
+
+from src.agents.narrative_agent import generate_template_narrative
 from src.agents.orchestrator import run_pipeline, run_pipeline_until_attribution
 
 
@@ -162,3 +165,82 @@ def test_full_pipeline_builds_narrative_and_report(monkeypatch) -> None:
     assert state["narrative_result"]["fallback_used"] is True
     assert state["report_result"]["report_summary"]["position_id"] == position["position_id"]
     assert "summary" in state["report_result"]["report_summary"]
+
+
+def test_template_narrative_prioritizes_largest_drivers() -> None:
+    """Template narrative должен выбирать крупнейшие драйверы по модулю."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-001",
+            "currency": "RUB",
+            "total_pnl": 1.61,
+            "components": {
+                "delta_effect": 0.92,
+                "gamma_effect": 0.13,
+                "vega_effect": 0.71,
+                "theta_effect": -0.09,
+                "residual": -0.06,
+            },
+            "residual_threshold_passed": True,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    narrative = generate_template_narrative(state)
+
+    assert narrative["top_drivers"][0]["name"] == "delta_effect"
+    assert narrative["top_drivers"][1]["name"] == "vega_effect"
+    assert "delta" in narrative["summary"]
+    assert "vega" in narrative["summary"]
+    assert narrative["validation_status"] == "passed"
+
+
+def test_template_narrative_rejects_inconsistent_position_id() -> None:
+    """Narrative layer должен падать на битом attribution payload."""
+    state = {
+        "position": {
+            "position_id": "POS-001",
+            "instrument_type": "option",
+            "currency": "RUB",
+        },
+        "market_snapshot_t0": None,
+        "market_snapshot_t1": None,
+        "pricing_result": None,
+        "attribution_result": {
+            "position_id": "POS-OTHER",
+            "currency": "RUB",
+            "total_pnl": 1.0,
+            "components": {
+                "delta_effect": 0.5,
+                "gamma_effect": 0.1,
+                "vega_effect": 0.2,
+                "theta_effect": -0.1,
+                "residual": 0.3,
+            },
+            "residual_threshold_passed": False,
+        },
+        "narrative_result": None,
+        "report_result": None,
+        "errors": [],
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+    }
+
+    with pytest.raises(ValueError, match="position_id mismatch"):
+        generate_template_narrative(state)
