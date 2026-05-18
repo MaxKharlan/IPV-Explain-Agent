@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from src.agents.attribution_agent import run_attribution_agent
+from src.agents.market_data_agent import run_market_data_agent
+from src.agents.pricing_agent import run_pricing_agent
 from src.agents.state import IPVState, create_initial_state
 
 
@@ -48,3 +51,12 @@ def build_report(
 def initialize_pipeline(position: dict[str, Any] | None = None) -> IPVState:
     """Создаёт стартовое состояние pipeline."""
     return create_initial_state(position=position)
+
+
+def run_pipeline_until_attribution(position: dict[str, Any]) -> IPVState:
+    """Прогоняет pipeline от позиции до attribution_result."""
+    state = initialize_pipeline(position=position)
+    state = run_market_data_agent(state)
+    state = run_pricing_agent(state)
+    state = run_attribution_agent(state)
+    return state
