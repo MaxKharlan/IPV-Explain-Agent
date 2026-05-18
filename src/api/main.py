@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
-from src.api.schemas import POSITION_INPUT_EXAMPLE
+from src.agents.orchestrator import run_pipeline
+from src.api.schemas import NARRATIVE_OUTPUT_EXAMPLE, POSITION_INPUT_EXAMPLE
 
 
 app = FastAPI(
@@ -23,24 +24,52 @@ def healthcheck() -> dict[str, str]:
 
 
 @app.post("/pipeline/run")
-def run_pipeline_stub(position: dict[str, Any]) -> dict[str, Any]:
-    """Placeholder pipeline endpoint.
+def run_pipeline_endpoint(position: dict[str, Any]) -> dict[str, Any]:
+    """Runs the current orchestration pipeline and returns a public API payload."""
+    try:
+        state = run_pipeline(position)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "status": "error",
+                "message": str(exc),
+                "position_id": position.get("position_id"),
+            },
+        ) from exc
 
-    The full orchestrator wiring is added in the next API step. For now the
-    endpoint confirms the input shape and returns a stub status.
-    """
+    report_result = state.get("report_result")
+    narrative_result = state.get("narrative_result")
     return {
-        "status": "accepted",
-        "message": "Pipeline API entrypoint is ready for orchestrator wiring.",
+        "status": "completed",
         "position_id": position.get("position_id"),
+        "report_result": report_result,
+        "narrative_result": narrative_result,
+        "fallback_flags": state.get("fallback_flags", {}),
+        "errors": state.get("errors", []),
     }
 
 
 PIPELINE_RUN_EXAMPLE = {
     "request_example": POSITION_INPUT_EXAMPLE,
     "response_example": {
-        "status": "accepted",
-        "message": "Pipeline API entrypoint is ready for orchestrator wiring.",
+        "status": "completed",
         "position_id": POSITION_INPUT_EXAMPLE["position_id"],
+        "report_result": {
+            "report_summary": {
+                "position_id": POSITION_INPUT_EXAMPLE["position_id"],
+                "instrument_type": POSITION_INPUT_EXAMPLE["instrument_type"],
+                "total_pnl": 1.45,
+                "summary": NARRATIVE_OUTPUT_EXAMPLE["summary"],
+                "used_mock_market_data": False,
+                "used_template_narrative": False,
+            }
+        },
+        "narrative_result": NARRATIVE_OUTPUT_EXAMPLE,
+        "fallback_flags": {
+            "used_mock_market_data": False,
+            "used_template_narrative": False,
+        },
+        "errors": [],
     },
 }
