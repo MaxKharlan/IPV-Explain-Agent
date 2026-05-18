@@ -87,7 +87,8 @@
         "option_type": "call",
         "strike": 280.0,
         "expiry": "2026-09-20",
-        "settlement_price": 12.4
+        "settlement_price": 12.4,
+        "instrument_id": "SBERC280"
       }
     ]
   },

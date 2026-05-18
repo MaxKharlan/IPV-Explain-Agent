@@ -17,15 +17,22 @@ POSITION_INPUT_EXAMPLE = {
 }
 
 MARKET_SNAPSHOT_EXAMPLE = {
-    "snapshot_id": "SNAP-2026-05-01",
-    "snapshot_date": "2026-05-01",
+    "snapshot_id": "SNAP-2025-05-05",
+    "snapshot_date": "2025-05-05",
     "source": "moex",
-    "spot_prices": {"SBER": 301.55},
+    "spot_prices": {"SBER": 307.10},
     "yield_curve": {
+        "snapshot_date": "2025-05-05",
         "currency": "RUB",
-        "points": [{"tenor": "1M", "rate": 0.165}],
+        "points": [
+            {"tenor": "1Y", "rate": 16.5},
+            {"tenor": "2Y", "rate": 16.8},
+            {"tenor": "5Y", "rate": 17.1},
+        ],
+        "source": "moex",
     },
     "option_quotes": {
+        "snapshot_date": "2025-05-05",
         "underlier": "SBER",
         "points": [
             {
@@ -33,8 +40,17 @@ MARKET_SNAPSHOT_EXAMPLE = {
                 "strike": 280.0,
                 "expiry": "2026-09-20",
                 "settlement_price": 12.4,
-            }
+                "instrument_id": "SBERC280",
+            },
+            {
+                "option_type": "put",
+                "strike": 290.0,
+                "expiry": "2026-09-20",
+                "settlement_price": 8.1,
+                "instrument_id": "SBERP290",
+            },
         ],
+        "source": "moex",
     },
     "quality_flags": {
         "used_mock_data": False,
